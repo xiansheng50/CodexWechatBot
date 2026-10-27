@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-27T08:52:48.972Z",
+  "clientId": "acceptance-example",
+  "purpose": "single new acceptance message; no retry",
+  "httpStatus": 200,
+  "fields": {
+    "message_id": "number"
+  },
+  "codes": {},
+  "emptyErrorMessage": false,
+  "localOutcome": "UNRECOGNIZED_RECEIPT"
+}

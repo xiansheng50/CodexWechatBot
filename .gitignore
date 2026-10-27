@@ -1,0 +1,23 @@
+node_modules/
+*.tgz
+.local/
+coverage/
+
+# Local credentials and daemon data (also applies to custom in-repo data dirs).
+.env
+.env.*
+!.env.example
+credentials.json
+runtime.json
+state.json
+config.json
+owner.lock
+owner.lock.guard/
+login-qr.png
+logs/
+*.log
+*.tmp
+
+# Raw acceptance snapshots contain real chat/message identifiers.
+/docs/*.json
+!/docs/weixin-real-send-receipt.json
