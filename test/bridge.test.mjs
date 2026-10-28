@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { Bridge, INITIAL_STATE } from '../src/bridge.mjs';
 import { JsonStore } from '../src/state-store.mjs';
+import { DesktopClient } from '../src/desktop-client.mjs';
 
 const thread = (id, extra = {}) => ({ id, hostId: 'local', kind: 'codex', title: `聊天${id}`, status: { type: 'idle' }, ...extra });
 const turn = (id, status = 'completed', text = `结果${id}`, markers = []) => ({ id, status, items: [
@@ -419,6 +420,92 @@ test('observation pages to both its anchor and an older unfinished subscribed tu
   assert.deepEqual(h.reads.map(r => r.cursor), [undefined, '1', '2']);
   assert.deepEqual(resultNotices(h).map(n => n.turnId).sort(), ['middle', 'new', 'older-active']);
   assert.deepEqual(h.state.read().chats.A.observation.pending, []);
+});
+
+test('size-limited observation follows smaller pages through anchors, pending turns and WeChat markers without duplicates', async t => {
+  const h = await fixture(t);
+  h.histories.set('A', [[turn('anchor'), turn('older-active', 'inProgress', null)]]);
+  await h.bridge.select('A');
+  // The unfinished turn predates the current anchor and must still be followed.
+  await h.state.update(s => { s.chats.A.observation.pending = ['older-active']; });
+  await h.receive(raw(1, '只执行一次'));
+  await h.dispatch();
+  const history = [turn('newest'), turn('requested', 'completed', '完整微信结果', ['WECHAT_MESSAGE_ID=1']),
+    turn('anchor'), turn('older-active', 'completed', '迟到结果')];
+  const desktop = new DesktopClient({ pipePath: 'unused', callerThreadId: 'A' });
+  desktop.tools = new Map([['read_thread', { namespace: 'codex_app' }]]);
+  const calls = [];
+  desktop.pipe.request = async (_method, params) => {
+    assert.equal(params.tool, 'read_thread');
+    calls.push(structuredClone(params.arguments));
+    if (params.arguments.turnLimit > 1) return { success: false, contentItems: [{ type: 'inputText',
+      text: 'Tool response exceeds the size limit. Request fewer turns or omit outputs. A single oversized turn cannot be returned by this tool.' }] };
+    const offset = Number(params.arguments.cursor || 0);
+    const next = offset + 1;
+    return { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify({ thread: thread('A'),
+      turns: history.slice(offset, next), page: { hasMore: next < history.length, nextCursor: next < history.length ? String(next) : null } }) }] };
+  };
+  h.bridge.desktop = desktop;
+  await h.bridge.observe();
+  assert.deepEqual(calls.map(c => [c.cursor, c.turnLimit]), [
+    [undefined, 10], [undefined, 1], ['1', 10], ['1', 1], ['2', 10], ['2', 1], ['3', 10], ['3', 1],
+  ]);
+  assert.ok(calls.every(c => c.includeOutputs === true), 'marker lookup must retain tool outputs');
+  assert.deepEqual(h.state.read().chats.A.observation, { anchor: 'newest', pending: [] });
+  assert.equal(h.state.read().inbound[0].status, 'completed');
+  assert.deepEqual(resultNotices(h).map(n => n.turnId), ['newest', 'requested', 'older-active']);
+  assert.match(resultNotices(h).find(n => n.turnId === 'requested').text, /完整微信结果/);
+  assert.equal(h.sends.length, 1);
+  await h.bridge.observe();
+  assert.equal(resultNotices(h).length, 3);
+  assert.equal(h.bridge.status().desktop, 'connected');
+});
+
+test('a second-page oversized turn preserves its chat state while other subscriptions continue', async t => {
+  const h = await fixture(t);
+  h.histories.set('A', [[turn('anchor')]]);
+  await h.bridge.select('A');
+  await h.bridge.setNotifications('B', true);
+  await h.receive(raw(1, '待关联要求'));
+  await h.dispatch();
+  h.histories.set('B', [[turn('B-new')]]);
+  const before = h.state.read();
+  const read = h.bridge.desktop.read.bind(h.bridge.desktop);
+  h.bridge.desktop.read = async (id, options) => {
+    if (id !== 'A') return read(id, options);
+    if (!options.cursor) return { thread: thread('A'), turns: [turn('newest')], page: { hasMore: true, nextCursor: 'older' } };
+    throw Object.assign(new Error('private response must not enter status'), { code: 'DESKTOP_RESPONSE_TOO_LARGE' });
+  };
+  await h.bridge.observe();
+  assert.deepEqual(h.state.read().chats.A, before.chats.A);
+  assert.deepEqual(h.state.read().inbound, before.inbound);
+  assert.deepEqual(resultNotices(h).map(n => n.turnId), ['B-new']);
+  assert.equal(h.bridge.status().desktop, 'connected');
+  assert.match(h.bridge.errors.observe, /#1.*内容.*大/);
+  assert.doesNotMatch(h.bridge.errors.observe, /private response/);
+  assert.equal(h.sends.length, 1);
+});
+
+test('explicit target and tool rejections do not mark the desktop disconnected, but transport failures do', async t => {
+  const h = await fixture(t);
+  await h.bridge.select('A');
+  const read = h.bridge.desktop.read.bind(h.bridge.desktop);
+  for (const code of ['TARGET_UNAVAILABLE', 'DESKTOP_TOOL_REJECTED']) {
+    h.bridge.errors.desktop = 'previous connection error';
+    h.bridge.desktop.read = async () => { throw Object.assign(new Error('rejected'), { code }); };
+    await h.bridge.observe();
+    assert.equal(h.bridge.status().desktop, 'connected');
+    assert.match(h.bridge.errors.observe, /#1/);
+  }
+  const before = h.state.read().chats.A.observation;
+  h.bridge.desktop.read = async () => { throw new Error('Desktop pipe closed'); };
+  await h.bridge.observe();
+  assert.equal(h.bridge.status().desktop, 'disconnected');
+  assert.deepEqual(h.state.read().chats.A.observation, before);
+  h.bridge.desktop.read = read;
+  await h.bridge.observe();
+  assert.equal(h.bridge.status().desktop, 'connected');
+  assert.equal(h.bridge.errors.observe, undefined);
 });
 
 test('confirmed requested turn outside the latest page is followed until it terminates', async t => {

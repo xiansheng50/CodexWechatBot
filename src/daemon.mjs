@@ -8,6 +8,7 @@ import { JsonStore, writeJsonAtomic } from './state-store.mjs';
 import { acquireOwnership, defaultDataDir, secureDirectory } from './local-runtime.mjs';
 import { WeixinClient } from './weixin-client.mjs';
 import { Bridge, INITIAL_STATE } from './bridge.mjs';
+import { isDesktopToolRejection } from './desktop-client.mjs';
 
 function sameSecret(a, b) {
   if (typeof a !== 'string') return false;
@@ -101,7 +102,11 @@ export async function startDaemon({ dir = defaultDataDir(), weixin = new WeixinC
           const checked = await bridge.requireDesktop().validate();
           delete bridge.errors.desktop;
           desktopCheck = { compatible: true, tools: Object.keys(checked.tools) };
-        } catch { bridge.errors.desktop = '当前桌面连接或必要 schema 校准未通过'; desktopCheck = { compatible: false }; }
+        } catch (error) {
+          if (isDesktopToolRejection(error)) delete bridge.errors.desktop;
+          else bridge.errors.desktop = '当前桌面连接或必要 schema 校准未通过';
+          desktopCheck = { compatible: false, ...(isDesktopToolRejection(error) ? { errorCode: error.code } : {}) };
+        }
         return { ...bridge.status(), desktopCheck, codeVersion: bridge.connection?.codeVersion || process.env.CODEX_VERSION || 'unknown' };
       },
       '/register': async body => {

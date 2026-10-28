@@ -118,6 +118,71 @@ test('calibrated Desktop not-found response rejects an unavailable target instea
   await assert.rejects(client.read('target'), e => e.code === 'TARGET_UNAVAILABLE');
 });
 
+const tooLargeReply = { success: false, contentItems: [{ type: 'inputText', text:
+  'Tool response exceeds the size limit. Request fewer turns or omit outputs. A single oversized turn cannot be returned by this tool.' }] };
+
+test('an explicitly oversized read retries one turn with the same cursor, outputs and calling identity', async () => {
+  const client = new DesktopClient({ pipePath: 'unused', callerThreadId: 'source', callerTurnId: 'source-turn' });
+  client.tools = new Map([['read_thread', { namespace: 'codex_app' }]]);
+  const calls = [];
+  const data = { thread: { id: 'target', hostId: 'local', kind: 'codex' },
+    turns: [{ id: 'older', items: [{ type: 'agentMessage', phase: 'final_answer', text: '完整结果' }] }],
+    page: { hasMore: true, nextCursor: 'after-older' } };
+  client.pipe.request = async (_method, params) => {
+    calls.push(structuredClone(params));
+    if (calls.length === 1) {
+      client.setCaller('another', 'another-turn');
+      return tooLargeReply;
+    }
+    return { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(data) }] };
+  };
+  assert.deepEqual(await client.read('target', { cursor: 'before-older', includeOutputs: true }), data);
+  assert.deepEqual(calls.map(c => c.arguments.turnLimit), [10, 1]);
+  for (const call of calls) {
+    assert.equal(call.threadId, 'source');
+    assert.equal(call.turnId, 'source-turn');
+    assert.equal(call.arguments.cursor, 'before-older');
+    assert.equal(call.arguments.includeOutputs, true);
+    assert.equal(call.arguments.maxOutputCharsPerItem, 18000);
+  }
+  calls.length = 0;
+  data.thread.id = 'wrong-target';
+  await assert.rejects(client.read('target'), e => e.code === 'TARGET_UNAVAILABLE');
+});
+
+test('one oversized turn remains a bounded, explicit read error', async () => {
+  for (const turnLimit of [10, 1]) {
+    const client = new DesktopClient({ pipePath: 'unused', callerThreadId: 'source' });
+    client.tools = new Map([['read_thread', { namespace: 'codex_app' }]]);
+    let calls = 0;
+    client.pipe.request = async () => { calls++; return tooLargeReply; };
+    await assert.rejects(client.read('target', { turnLimit }), e => e.code === 'DESKTOP_RESPONSE_TOO_LARGE');
+    assert.equal(calls, turnLimit === 1 ? 1 : 2);
+  }
+});
+
+test('read retries exclude other rejections, transport failures and malformed replies; writes are never retried', async () => {
+  for (const [reply, code] of [
+    [{ success: false, contentItems: [{ type: 'inputText', text: 'Access denied' }] }, 'DESKTOP_TOOL_REJECTED'],
+    [{ contentItems: tooLargeReply.contentItems }, undefined],
+    [{ success: true, contentItems: [{ type: 'inputText', text: 'invalid-json' }] }, undefined],
+    [new Error('Desktop tools/call timed out; write outcome may be unknown'), undefined],
+  ]) {
+    const client = new DesktopClient({ pipePath: 'unused', callerThreadId: 'source' });
+    client.tools = new Map([['read_thread', { namespace: 'codex_app' }]]);
+    let calls = 0;
+    client.pipe.request = async () => { calls++; if (reply instanceof Error) throw reply; return reply; };
+    await assert.rejects(client.read('target'), e => e.code === code);
+    assert.equal(calls, 1);
+  }
+  const client = new DesktopClient({ pipePath: 'unused', callerThreadId: 'source' });
+  client.tools = new Map([['send_message_to_thread', { namespace: 'codex_app' }]]);
+  let calls = 0;
+  client.pipe.request = async () => { calls++; return tooLargeReply; };
+  await assert.rejects(client.send('target', 'execute once'), e => e.code === 'DESKTOP_TOOL_REJECTED');
+  assert.equal(calls, 1);
+});
+
 const objectSchema = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false });
 const stringSchema = { type: 'string' };
 function catalog() {

@@ -7,6 +7,11 @@ const ALLOWED = [...REQUIRED, 'list_projects', 'create_thread'];
 const createArguments = (projectId, prompt) => ({ target: projectId === null ? { type: 'projectless' } :
   { type: 'project', projectId, environment: { type: 'local' } }, prompt });
 
+// These errors require a readable Desktop reply, rather than a failed transport.
+export function isDesktopToolRejection(error) {
+  return ['TARGET_UNAVAILABLE', 'DESKTOP_RESPONSE_TOO_LARGE', 'DESKTOP_TOOL_REJECTED'].includes(error?.code);
+}
+
 // Check the exact optional capability we use, including required nested fields.
 function accepts(schema, value) {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return false;
@@ -149,20 +154,33 @@ export class DesktopClient {
       turnId: connection.callerTurnId || `wechat-${randomUUID()}`,
     });
     if (result.success !== true) {
+      if (result.success === false && name === 'read_thread' && result.contentItems?.some(c => c.type === 'inputText' &&
+        c.text?.startsWith('Tool response exceeds the size limit.'))) {
+        throw Object.assign(new Error('桌面返回内容过大，请在 Codex 查看该聊天'), { code: 'DESKTOP_RESPONSE_TOO_LARGE' });
+      }
       // Calibrated against the current Desktop's explicit not-found reply, not transport timeouts.
-      if (name === 'read_thread' && result.contentItems?.some(c => c.type === 'inputText' &&
+      if (result.success === false && name === 'read_thread' && result.contentItems?.some(c => c.type === 'inputText' &&
         c.text?.startsWith(`No Codex thread found for threadId: ${args.threadId}. Hosts without a readable match:`))) {
         throw Object.assign(new Error('目标聊天不存在或当前不可读取，请先在桌面确认'), { code: 'TARGET_UNAVAILABLE' });
       }
-      throw new Error(JSON.stringify(result.contentItems));
+      throw Object.assign(new Error(JSON.stringify(result.contentItems)),
+        result.success === false ? { code: 'DESKTOP_TOOL_REJECTED' } : {});
     }
     const texts = result.contentItems?.filter(c => c.type === 'inputText').map(c => c.text);
     if (texts?.length !== 1) throw new Error('Unsupported Desktop response content');
     return JSON.parse(texts[0]);
   }
-  async read(threadId, options = {}, connection) {
-    const data = await this.call('read_thread', { hostId: 'local', threadId, turnLimit: 10,
-      includeOutputs: true, maxOutputCharsPerItem: 18000, ...options }, connection);
+  async read(threadId, options = {}, connection = this.connection) {
+    const args = { hostId: 'local', threadId, turnLimit: 10,
+      includeOutputs: true, maxOutputCharsPerItem: 18000, ...options };
+    let data;
+    try { data = await this.call('read_thread', args, connection); }
+    catch (error) {
+      // Retry only this explicitly rejected read. Keep the cursor, outputs and caller;
+      // the returned page tells observation where to continue without skipping turns.
+      if (error.code !== 'DESKTOP_RESPONSE_TOO_LARGE' || !(args.turnLimit > 1)) throw error;
+      data = await this.call('read_thread', { ...args, turnLimit: 1 }, connection);
+    }
     if (data.thread?.id !== threadId || data.thread?.hostId !== 'local' || data.thread?.kind !== 'codex') {
       throw Object.assign(new Error('Desktop target is not the expected local main chat'), { code: 'TARGET_UNAVAILABLE' });
     }

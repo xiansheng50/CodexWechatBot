@@ -119,6 +119,26 @@ test('global notification mode is visible through local status and survives daem
   assert.equal(JSON.parse(await readFile(join(f.dir, 'config.json'), 'utf8')).notificationMode, 'brief');
 });
 
+test('doctor distinguishes a caller read rejection from a failed desktop connection', async t => {
+  const f = await fixture(t);
+  await localCall(f.dir, '/register', { connection: {
+    pipePath: '\\\\.\\pipe\\test-doctor-rejections', hostId: 'local', callerThreadId: 'main',
+  } });
+  const validate = f.service.bridge.desktop.validate;
+  for (const code of ['DESKTOP_RESPONSE_TOO_LARGE', 'TARGET_UNAVAILABLE', 'DESKTOP_TOOL_REJECTED', undefined]) {
+    f.service.bridge.errors.desktop = 'previous failure';
+    f.service.bridge.desktop.validate = async () => { throw Object.assign(new Error('check failed'), code ? { code } : {}); };
+    const status = await localCall(f.dir, '/doctor');
+    assert.equal(status.desktop, code ? 'connected' : 'disconnected');
+    assert.equal(status.desktopCheck.compatible, false);
+    assert.equal(status.desktopCheck.errorCode, code);
+  }
+  f.service.bridge.desktop.validate = async () => ({ ...await validate(), tools: { read_thread: {} } });
+  const recovered = await localCall(f.dir, '/doctor');
+  assert.equal(recovered.desktop, 'connected');
+  assert.equal(recovered.desktopCheck.compatible, true);
+});
+
 test('same-pipe caller registration does not close a transport with ongoing work', async t => {
   const f = await fixture(t);
   const connection = { pipePath: '\\\\.\\pipe\\test-bridge', hostId: 'local', callerThreadId: 'main' };

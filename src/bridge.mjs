@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { DesktopClient } from './desktop-client.mjs';
+import { DesktopClient, isDesktopToolRejection } from './desktop-client.mjs';
 import { HELP, parseCommand, ensureChat, byNumber, listText } from './routing.mjs';
 import { isTerminal, deliveryInTurn, finalText, addNotice, recoverState, truncate } from './notifications.mjs';
 import { normalizeInbound } from './weixin-client.mjs';
@@ -81,7 +81,11 @@ export class Bridge {
       delete this.errors.desktop;
       return data;
     }
-    catch (e) { this.errors.desktop = '桌面读取失败，请在电脑运行 doctor 或调用 wechat_status'; throw e; }
+    catch (e) {
+      if (isDesktopToolRejection(e)) delete this.errors.desktop;
+      else this.errors.desktop = '桌面读取失败，请在电脑运行 doctor 或调用 wechat_status';
+      throw e;
+    }
   }
   async chatCurrent(threadId, connection = this.connection) {
     const data = await this.readChat(threadId, { turnLimit: 1, includeOutputs: false }, connection);
@@ -370,14 +374,21 @@ export class Bridge {
       const s = this.state.read();
       const ids = [...new Set([...Object.values(s.chats).filter(c => c.enabled).map(c => c.threadId),
         ...s.inbound.filter(m => m.target && ['submitted', 'unknown', 'confirmed'].includes(m.status)).map(m => m.target)])];
-      let index = 0, failed = false;
+      let index = 0;
+      const failures = [];
       await Promise.all(Array.from({ length: Math.min(2, ids.length) }, async () => {
         while (index < ids.length && !this.closed) {
           const id = ids[index++];
-          try { await this.observeChat(id); } catch { failed = true; this.errors.observe = '观察失败，已保留观察位置；请在电脑检查连接。'; }
+          try { await this.observeChat(id); }
+          catch (error) {
+            const reason = { DESKTOP_RESPONSE_TOO_LARGE: '返回内容过大', TARGET_UNAVAILABLE: '目标聊天不可读取',
+              DESKTOP_TOOL_REJECTED: '桌面工具拒绝读取' }[error?.code] || '读取失败';
+            failures.push(`#${s.chats[id].number}：${reason}`);
+            this.errors.observe = `观察失败（${failures.join('；')}），已保留观察位置；请在 Codex 检查对应聊天。`;
+          }
         }
       }));
-      if (!failed) delete this.errors.observe;
+      if (!failures.length) delete this.errors.observe;
     } finally { this.observing = false; }
   }
   async sendPending() {
