@@ -104,3 +104,7 @@ Windows 单实例校验同时核对进程编号和创建时间，避免旧进程
 可选自启动命令：`node src/cli.mjs autostart enable` / `disable`，使用当前用户 Windows 登录任务、隐藏窗口、不提权。当前只实现命令并检查脚本语法，**尚未注册启用，也未验证真实登录触发**。MCP 加载时按需启动不等于 Windows 登录自启动。隐藏启动器本身已在当前 Windows 实际运行成功。
 
 协议与许可见 [微信适配说明](docs/weixin-protocol.md)、[第三方声明](THIRD_PARTY_NOTICES.md)；设计与旧证据见 [实施方案](IMPLEMENTATION_PLAN.md)、[技术证据](docs/technical-evidence.md)、[P0 MCP 调查](docs/p0-mcp-investigation.md)。
+
+## 开源许可
+
+本项目自有代码采用 [MIT License](LICENSE)，版权署名为 `Copyright (c) 2026 xiansheng50`。第三方代码保留各自的版权及许可声明，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
