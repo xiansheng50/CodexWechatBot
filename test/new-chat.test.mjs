@@ -21,8 +21,15 @@ const initialTurn = (id, marker, status = 'inProgress', result = null) => ({ id,
 ] });
 const results = h => h.state.read().notifications.filter(n => n.kind === 'result');
 const createdAcks = h => h.state.read().notifications.filter(n => n.kind === 'reply' && /已创建/.test(n.text));
+const creationModes = [
+  { label: 'specified project', command: '新建 示例项目｜首条要求', projectId: 'project-demo' },
+  { label: 'projectless', command: '新建｜首条要求', projectId: null },
+];
+function testCreationModes(name, run) {
+  for (const mode of creationModes) test(`${name} (${mode.label})`, t => run(t, mode));
+}
 
-async function fixture(t, { unsupported = false } = {}) {
+async function fixture(t, { unsupported = false, noProjectListing = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'wechatbot-new-chat-test-'));
   const h = { directory, projects: [project()], threads: new Map([['A', thread('A')]]), histories: new Map(),
     reads: [], creates: [], sends: [], notices: [], onCreate: async () => ({ threadId: 'NEW', hostId: 'local' }) };
@@ -33,7 +40,7 @@ async function fixture(t, { unsupported = false } = {}) {
   });
   const desktopFactory = () => ({
     async validate() { return { thread: h.threads.get('A') }; },
-    async projects() { return { projects: structuredClone(h.projects) }; },
+    ...(noProjectListing ? {} : { async projects() { return { projects: structuredClone(h.projects) }; } }),
     ...(unsupported ? {} : { async create(projectId, prompt) {
       h.creates.push({ projectId, prompt });
       const response = await h.onCreate(projectId, prompt);
@@ -107,9 +114,45 @@ test('create persists intent before the external write and selects its stable nu
   assert.equal(results(h).length, 0, 'create acceptance is not a completed turn');
 });
 
-test('ordinary messages bind in reception order around creation and use the minimal marker header', async t => {
+test('projectless creation persists intent and selects the new chat without project listing or subscriptions', async t => {
+  for (const command of ['新建｜首条要求', '新建 | 首条要求']) {
+    await t.test(command, async t => {
+      const h = await fixture(t, { noProjectListing: true });
+      h.projects = [];
+      await h.bridge.setNotifications('A', true);
+      const previousObservation = h.state.read().chats.A;
+      h.onCreate = async (projectId, prompt) => {
+        const saved = JSON.parse(await readFile(join(h.directory, 'state.json'), 'utf8'));
+        const row = saved.inbound[0];
+        assert.equal(row.operation, 'create');
+        assert.equal(row.status, 'submitting');
+        assert.equal(row.projectId, null);
+        assert.equal(row.projectLabel, '无项目');
+        assert.equal(row.prompt, '首条要求');
+        assert.equal(saved.selected, 'A');
+        assert.equal(projectId, null);
+        assert.equal(prompt, 'WECHAT_MESSAGE_ID=1\n\n首条要求');
+        return { threadId: 'NEW', hostId: 'local' };
+      };
+      await h.receive(raw(1, command));
+      const saved = h.state.read();
+      assert.deepEqual(h.creates, [{ projectId: null, prompt: 'WECHAT_MESSAGE_ID=1\n\n首条要求' }]);
+      assert.equal(saved.inbound[0].status, 'submitted');
+      assert.equal(saved.inbound[0].target, 'NEW');
+      assert.equal(saved.selected, 'NEW');
+      assert.equal(saved.chats.NEW.number, 2);
+      assert.match(saved.chats.NEW.title, /新聊天.*无项目/);
+      assert.equal(saved.chats.NEW.enabled, false);
+      assert.deepEqual(saved.chats.A, previousObservation);
+      assert.equal(createdAcks(h).length, 1);
+      assert.equal(results(h).length, 0);
+    });
+  }
+});
+
+testCreationModes('ordinary messages bind in reception order around creation and use the minimal marker header', async (t, mode) => {
   const h = await fixture(t);
-  await h.receive(raw(1, '创建前'), raw(2, '新建 Demo | 首条要求'), raw(3, '创建后'));
+  await h.receive(raw(1, '创建前'), raw(2, mode.command), raw(3, '创建后'));
   assert.deepEqual(h.state.read().inbound.map(m => m.target), ['A', 'NEW', 'NEW']);
   await h.dispatch();
   assert.deepEqual(h.sends, [{ id: 'A', prompt: 'WECHAT_MESSAGE_ID=1\n\n创建前' },
@@ -162,7 +205,7 @@ test('unknown, ambiguous and remote project selectors reject without falling thr
 
 test('malformed new-chat commands never become tasks in the previous target', async t => {
   const h = await fixture(t);
-  await h.receive(...['新建', '新建 示例项目', '新建 示例项目｜', '新建 ｜首条要求'].map((text, i) => raw(i + 1, text)));
+  await h.receive(...['新建', '新建 示例项目', '新建 示例项目｜', '新建｜', '新建 | '].map((text, i) => raw(i + 1, text)));
   await h.dispatch();
   assert.equal(h.creates.length, 0);
   assert.equal(h.sends.length, 0);
@@ -170,9 +213,9 @@ test('malformed new-chat commands never become tasks in the previous target', as
   assert.ok(h.state.read().inbound.every(m => m.status === 'rejected'));
 });
 
-test('unsupported creation preserves the old target and reports rejection', async t => {
+testCreationModes('unsupported creation preserves the old target and reports rejection', async (t, mode) => {
   const h = await fixture(t, { unsupported: true });
-  await h.receive(raw(1, '新建 示例项目｜首条要求'));
+  await h.receive(raw(1, mode.command));
   await h.dispatch();
   assert.equal(h.state.read().inbound[0].status, 'rejected');
   assert.equal(h.state.read().selected, 'A');
@@ -180,9 +223,9 @@ test('unsupported creation preserves the old target and reports rejection', asyn
   assert.match(h.state.read().notifications[0].text, /未执行/);
 });
 
-test('duplicate creation batches and restart preserve a single external create and stable chat number', async t => {
+testCreationModes('duplicate creation batches and restart preserve a single external create and stable chat number', async (t, mode) => {
   const h = await fixture(t);
-  const message = raw('18446744073709551615', '新建 示例项目｜首条要求');
+  const message = raw('18446744073709551615', mode.command);
   await h.receive(message, message);
   const number = h.state.read().chats.NEW?.number;
   await h.restart();
@@ -196,9 +239,9 @@ test('duplicate creation batches and restart preserve a single external create a
   assert.equal(createdAcks(h).length, 1);
 });
 
-test('actual create_thread delegation associates the created turn and returns one result only after it ends', async t => {
+testCreationModes('actual create_thread delegation associates the created turn and returns one result only after it ends', async (t, mode) => {
   const h = await fixture(t);
-  await h.receive(raw(1, '新建 示例项目｜首条要求'));
+  await h.receive(raw(1, mode.command));
   h.histories.set('NEW', [[initialTurn('actual-turn', 'WECHAT_MESSAGE_ID=1', 'inProgress', '尚未结束的文本')]]);
   await h.bridge.observe();
   assert.equal(h.state.read().inbound[0].status, 'confirmed');
@@ -280,12 +323,12 @@ test('legacy delivery output remains recoverable alongside the new userMessage m
   assert.equal(results(h)[0].turnId, 'legacy');
 });
 
-test('unknown create responses preserve selection, survive replay and never observe an undefined target', async t => {
+testCreationModes('unknown create responses preserve selection, survive replay and never observe an undefined target', async (t, mode) => {
   for (const response of ['throw', {}, { threadId: '' }, { threadId: '   ' }, { threadId: 'NEW', hostId: 'remote-host' }]) {
     await t.test(JSON.stringify(response), async t => {
       const h = await fixture(t);
       h.onCreate = async () => { if (response === 'throw') throw Error('lost after write'); return response; };
-      const message = raw(1, '新建 示例项目｜首条要求');
+      const message = raw(1, mode.command);
       await h.receive(message);
       assert.equal(h.state.read().inbound[0].operation, 'create');
       assert.equal(h.state.read().inbound[0].status, 'unknown');
@@ -306,13 +349,13 @@ test('unknown create responses preserve selection, survive replay and never obse
   }
 });
 
-test('restart converts an in-flight create without target to unknown and does not create or dispatch it again', async t => {
+testCreationModes('restart converts an in-flight create without target to unknown and does not create or dispatch it again', async (t, mode) => {
   const h = await fixture(t);
-  await h.bridge.acceptBatch({ msgs: [raw(1, '新建 示例项目｜首条要求')], get_updates_buf: 'crash-cursor' });
+  await h.bridge.acceptBatch({ msgs: [raw(1, mode.command)], get_updates_buf: 'crash-cursor' });
   await h.state.update(s => Object.assign(s.inbound[0], { operation: 'create', status: 'submitting',
-    marker: 'WECHAT_MESSAGE_ID=1', projectId: 'project-demo', prompt: '首条要求' }));
+    marker: 'WECHAT_MESSAGE_ID=1', projectId: mode.projectId, prompt: '首条要求' }));
   await h.restart();
-  await h.receive(raw(1, '新建 示例项目｜首条要求'));
+  await h.receive(raw(1, mode.command));
   await h.dispatch();
   await h.bridge.observe();
   assert.equal(h.state.read().inbound[0].status, 'unknown');

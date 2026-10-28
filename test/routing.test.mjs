@@ -16,6 +16,18 @@ test('commands require complete matches and numbered messages do not imply selec
   }
 });
 
+test('new-chat commands distinguish projectless and explicit projects and require a prompt', () => {
+  for (const text of ['新建｜首条要求', '新建|首条要求', ' 新建 ｜ 首条要求 ']) {
+    assert.deepEqual(parseCommand(text), { type: 'create', project: null, text: '首条要求' });
+  }
+  assert.deepEqual(parseCommand('新建 Demo ｜首条要求\n第二行'), {
+    type: 'create', project: 'Demo', text: '首条要求\n第二行',
+  });
+  for (const text of ['新建', '新建 Demo', '新建｜', '新建|  ', '新建 Demo｜']) {
+    assert.deepEqual(parseCommand(text), { type: 'invalid_create' });
+  }
+});
+
 test('stable numbers survive title changes and are never reused for another chat', () => {
   const state = structuredClone(INITIAL_STATE);
   assert.equal(ensureChat(state, thread('A')).number, 1);

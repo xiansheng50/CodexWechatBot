@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 const MAX_FRAME = 8 * 1024 * 1024;
 const REQUIRED = ['list_threads', 'read_thread', 'send_message_to_thread'];
 const ALLOWED = [...REQUIRED, 'list_projects', 'create_thread'];
+const createArguments = (projectId, prompt) => ({ target: projectId === null ? { type: 'projectless' } :
+  { type: 'project', projectId, environment: { type: 'local' } }, prompt });
 
 // Check the exact optional capability we use, including required nested fields.
 function accepts(schema, value) {
@@ -124,12 +126,12 @@ export class DesktopClient {
       this.tools.set(name, tool);
     }
     this.optionalToolErrors = new Map();
-    for (const [name, args] of [
-      ['list_projects', {}],
-      ['create_thread', { target: { type: 'project', projectId: 'project-id', environment: { type: 'local' } }, prompt: 'prompt' }],
+    for (const [name, variants] of [
+      ['list_projects', [{}]],
+      ['create_thread', [createArguments('project-id', 'prompt'), createArguments(null, 'prompt')]],
     ]) {
       const tool = result.tools.find(t => t.name === name);
-      if (tool?.namespace && accepts(tool.inputSchema, args)) this.tools.set(name, tool);
+      if (tool?.namespace && variants.some(args => accepts(tool.inputSchema, args))) this.tools.set(name, tool);
       else this.optionalToolErrors.set(name, `Desktop 新建聊天功能不可用：${name} schema 缺失或不兼容，请运行 doctor`);
     }
     const data = await this.read(this.connection.callerThreadId, { turnLimit: 1, includeOutputs: false });
@@ -137,6 +139,9 @@ export class DesktopClient {
   }
   async call(name, args, connection = this.connection) {
     if (!ALLOWED.includes(name) || !this.tools?.has(name)) throw new Error(this.optionalToolErrors?.get(name) || 'Desktop tool unavailable; run doctor');
+    if (name === 'create_thread' && !accepts(this.tools.get(name).inputSchema, args)) {
+      throw new Error('Desktop 新建聊天功能不可用：当前创建类型的 schema 不兼容，请运行 doctor');
+    }
     const result = await this.pipe.request('tools/call', {
       arguments: args, callerSource: 'codex', callId: `wechat-${randomUUID()}`,
       hostId: connection.hostId, namespace: this.tools.get(name).namespace,
@@ -165,12 +170,12 @@ export class DesktopClient {
   }
   list(args = {}) { return this.call('list_threads', args); }
   projects() { return this.call('list_projects', {}); }
-  canCreate() { return this.tools?.has('create_thread') === true; }
+  canCreate(projectId = 'project-id') { return accepts(this.tools?.get('create_thread')?.inputSchema, createArguments(projectId, 'prompt')); }
   create(projectId, prompt) {
-    if (typeof projectId !== 'string' || !projectId.trim() || typeof prompt !== 'string' || !prompt.trim()) {
-      throw new Error('新建聊天需要项目 ID 和首条要求');
+    if (projectId !== null && (typeof projectId !== 'string' || !projectId.trim()) || typeof prompt !== 'string' || !prompt.trim()) {
+      throw new Error('新建聊天需要有效项目 ID（无项目时为 null）和非空首条要求');
     }
-    return this.call('create_thread', { target: { type: 'project', projectId, environment: { type: 'local' } }, prompt });
+    return this.call('create_thread', createArguments(projectId, prompt));
   }
   send(threadId, prompt) { return this.call('send_message_to_thread', { hostId: 'local', threadId, prompt }); }
   close() { this.pipe.close(); }

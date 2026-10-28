@@ -130,7 +130,8 @@ function catalog() {
     ['create_thread', objectSchema({ prompt: stringSchema, target: { anyOf: [objectSchema({
       type: { type: 'string', enum: ['project'] }, projectId: stringSchema,
       environment: { anyOf: [objectSchema({ type: { type: 'string', enum: ['local'] } }, ['type'])] },
-    }, ['type', 'projectId', 'environment'])] }, model: stringSchema, thinking: stringSchema, title: stringSchema }, ['prompt', 'target'])],
+    }, ['type', 'projectId', 'environment']), objectSchema({ type: { type: 'string', enum: ['projectless'] },
+      directoryName: stringSchema }, ['type'])] }, model: stringSchema, thinking: stringSchema, title: stringSchema }, ['prompt', 'target'])],
   ].map(([name, inputSchema]) => ({ name, namespace: 'codex_app', inputSchema }));
 }
 function catalogClient(tools) {
@@ -163,6 +164,37 @@ test('calibrated project tools use exact local target and omit model, thinking, 
   assert.throws(() => client.create('', 'prompt'), /项目 ID/);
   assert.throws(() => client.create('id', ' '), /首条要求/);
   await assert.rejects(client.call('arbitrary_tool', {}), /unavailable/);
+});
+
+test('projectless creation uses only its target type and prompt, without project-list capability', async () => {
+  const { client, calls } = catalogClient(catalog().filter(t => t.name !== 'list_projects'));
+  await client.validate();
+  assert.equal(client.canCreate(null), true);
+  assert.deepEqual(await client.create(null, '首条要求'), { threadId: 'created', hostId: 'local' });
+  assert.deepEqual(calls.at(-1).params.arguments, { target: { type: 'projectless' }, prompt: '首条要求' });
+  assert.equal(calls.some(c => c.params?.tool === 'list_projects'), false);
+  for (const id of [undefined, '', ' ', 42]) assert.throws(() => client.create(id, 'prompt'), /项目 ID/);
+  assert.throws(() => client.create(null, ' '), /首条要求/);
+});
+
+test('creation modes are calibrated independently and unsupported modes never dispatch', async () => {
+  for (const supported of ['project', 'projectless']) {
+    const tools = catalog();
+    tools.find(t => t.name === 'create_thread').inputSchema.properties.target.anyOf =
+      tools.find(t => t.name === 'create_thread').inputSchema.properties.target.anyOf
+        .filter(s => s.properties.type.enum.includes(supported));
+    const { client, calls } = catalogClient(tools);
+    await client.validate();
+    const supportedId = supported === 'project' ? 'bot-id' : null;
+    const unsupportedId = supported === 'project' ? null : 'bot-id';
+    assert.equal(client.canCreate(supportedId), true);
+    assert.equal(client.canCreate(unsupportedId), false);
+    await client.create(supportedId, 'prompt');
+    const before = calls.length;
+    await assert.rejects(client.create(unsupportedId, 'prompt'), /新建聊天功能不可用/);
+    assert.equal(calls.length, before);
+    await client.send('source', 'existing conversation still works');
+  }
 });
 
 test('missing or incompatible optional creation tools leave existing tools usable', async () => {

@@ -161,7 +161,7 @@ export class Bridge {
             else if (cmd.type === 'projects') {
               const projects = await this.requireDesktop().projects();
               await this.reply(`reply:${record.id}`, projectListText(projects, cmd.page));
-            } else if (cmd.type === 'invalid_create') throw new Error('用法：新建 项目名｜首条要求。先发送“项目”查看可用项目。');
+            } else if (cmd.type === 'invalid_create') throw new Error('用法：新建｜首条要求，或新建 项目名｜首条要求。先发送“项目”查看可用项目。');
             else if (cmd.type === 'create') { await this.createChat(record, cmd); continue; }
             else if (cmd.type === 'select') {
               const chat = byNumber(this.state.read(), cmd.number);
@@ -201,14 +201,16 @@ export class Bridge {
   }
   async createChat(record, cmd) {
     const desktop = this.requireDesktop();
-    const project = resolveProject(await desktop.projects(), cmd.project);
+    const project = cmd.project === null ? null : resolveProject(await desktop.projects(), cmd.project);
+    const projectId = project?.projectId ?? null;
+    const projectLabel = project?.label ?? '无项目';
     // Preflight unsupported creation before persisting an intent that might have been dispatched.
-    if (typeof desktop.create !== 'function' || desktop.canCreate?.() === false) throw new Error('当前桌面不支持新建聊天，请运行 doctor 检查');
+    if (typeof desktop.create !== 'function' || desktop.canCreate?.(projectId) === false) throw new Error('当前桌面不支持此类型的新建聊天，请运行 doctor 检查');
     if (this.closed) return;
     const marker = `WECHAT_MESSAGE_ID=${record.id}`;
     await this.state.update(s => {
       const row = s.inbound.find(m => m.id === record.id);
-      Object.assign(row, { operation: 'create', projectId: project.projectId, projectLabel: project.label,
+      Object.assign(row, { operation: 'create', projectId, projectLabel,
         prompt: cmd.text, marker, status: 'submitting', attemptedAt: new Date().toISOString() });
     });
     if (this.closed) {
@@ -217,7 +219,7 @@ export class Bridge {
     }
     let createdThreadId;
     try {
-      const result = await desktop.create(project.projectId, `${marker}\n\n${cmd.text}`);
+      const result = await desktop.create(projectId, `${marker}\n\n${cmd.text}`);
       if (typeof result?.threadId !== 'string' || !result.threadId.trim() || (result.hostId && result.hostId !== 'local')) {
         throw new Error('创建回执没有可确认的本地聊天 ID');
       }
@@ -225,9 +227,9 @@ export class Bridge {
       await this.state.update(s => {
         const row = s.inbound.find(m => m.id === record.id);
         row.target = result.threadId; row.status = 'submitted';
-        const chat = ensureChat(s, { id: result.threadId, hostId: 'local', kind: 'codex', title: `新聊天（${project.label}）` });
+        const chat = ensureChat(s, { id: result.threadId, hostId: 'local', kind: 'codex', title: `新聊天（${projectLabel}）` });
         s.selected = chat.threadId;
-        addNotice(s, { id: `ack:${record.id}`, kind: 'reply', text: `已创建 #${chat.number}（项目：${project.label}），已切换为当前目标。首条要求已受理，本轮结束后返回结果。` });
+        addNotice(s, { id: `ack:${record.id}`, kind: 'reply', text: `已创建 #${chat.number}（项目：${projectLabel}），已切换为当前目标。首条要求已受理，本轮结束后返回结果。` });
       });
     } catch {
       await this.state.update(s => {
@@ -235,10 +237,10 @@ export class Bridge {
         row.status = 'unknown';
         if (createdThreadId) {
           row.target = createdThreadId;
-          ensureChat(s, { id: createdThreadId, hostId: 'local', kind: 'codex', title: `新聊天（${project.label}）` });
+          ensureChat(s, { id: createdThreadId, hostId: 'local', kind: 'codex', title: `新聊天（${projectLabel}）` });
         }
       });
-      await this.reply(`unknown:${record.id}`, `新建聊天状态待确认（项目：${project.label}）。请在桌面核对，服务不会自动重建或重发首条要求。`);
+      await this.reply(`unknown:${record.id}`, `新建聊天状态待确认（项目：${projectLabel}）。请在桌面核对，服务不会自动重建或重发首条要求。`);
     }
   }
   dispatchReady() {

@@ -1,4 +1,4 @@
-export const HELP = '列表 [页码]\n项目 [页码]\n新建 项目名｜首条要求（成功后自动切换）\n切换 #3\n#3 你的要求（单次，不切换目标）\n通知 #3 开 / 通知 #3 关\n状态 / 帮助\n普通文字发给上次明确选择的聊天。';
+export const HELP = '列表 [页码]\n项目 [页码]\n新建｜首条要求（无项目，成功后自动切换）\n新建 项目名｜首条要求（成功后自动切换）\n切换 #3\n#3 你的要求（单次，不切换目标）\n通知 #3 开 / 通知 #3 关\n状态 / 帮助\n普通文字发给上次明确选择的聊天。';
 
 export function parseCommand(text) {
   text = text.trim();
@@ -7,9 +7,9 @@ export function parseCommand(text) {
   if (text === '状态') return { type: 'status' };
   if ((m = /^项目(?:\s+([1-9]\d*))?$/.exec(text))) return { type: 'projects', page: Number(m[1] || 1) };
   if (/^新建(?:\s|[|｜]|$)/.test(text)) {
-    m = /^新建\s+([^|｜\r\n]+)[|｜]([\s\S]*)$/.exec(text);
-    if (!m || !m[1].trim() || !m[2].trim()) return { type: 'invalid_create' };
-    return { type: 'create', project: m[1].trim(), text: m[2].trim() };
+    m = /^新建(?:\s+([^|｜\r\n]*))?[|｜]([\s\S]*)$/.exec(text);
+    if (!m || !m[2].trim()) return { type: 'invalid_create' };
+    return { type: 'create', project: m[1]?.trim() || null, text: m[2].trim() };
   }
   if ((m = /^列表(?:\s+([1-9]\d*))?$/.exec(text))) return { type: 'list', page: Number(m[1] || 1) };
   if ((m = /^切换\s+#([1-9]\d*)$/.exec(text))) return { type: 'select', number: Number(m[1]) };
