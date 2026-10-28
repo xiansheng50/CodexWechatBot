@@ -19,9 +19,10 @@ export function truncate(text, max = 1500) {
   return points.slice(0, max - Array.from(suffix).length).join('') + suffix;
 }
 
-export function finalText(chat, turn, selectedNumber) {
+export function finalText(chat, turn, selectedNumber, mode = 'full') {
   const label = { completed: '本轮已结束', failed: '执行失败', interrupted: '已中断' }[turn.status];
   if (!label) throw new Error('Turn is not terminal');
+  if (mode === 'brief') return `[#${chat.number} ${chat.title}] ${label}，请在 Codex 查看结果。`;
   const result = turn.items?.findLast(i => i.type === 'agentMessage' && i.phase === 'final_answer' &&
     typeof i.text === 'string' && i.text.trim())?.text.trim();
   const excerpt = result ? result.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/```[^\n]*\n/g, '').replace(/```/g, '') : '本轮没有最终文字回复，请回桌面查看实际状态。';

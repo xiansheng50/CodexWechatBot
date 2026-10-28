@@ -293,6 +293,25 @@ testCreationModes('actual create_thread delegation associates the created turn a
   assert.equal(h.notices.length, 2);
 });
 
+testCreationModes('global brief mode applies to new-chat confirmation and first result', async (t, mode) => {
+  const h = await fixture(t);
+  await h.bridge.setNotificationMode('brief');
+  await h.receive(raw(1, mode.command));
+  assert.equal(h.bridge.notificationMode(), 'brief');
+  assert.match(createdAcks(h)[0].text, /本轮结束后发送通知/);
+  assert.doesNotMatch(createdAcks(h)[0].text, /返回结果/);
+  h.histories.set('NEW', [[initialTurn('actual-turn', 'WECHAT_MESSAGE_ID=1', 'completed', '不应发送的首轮正文')]]);
+  await h.bridge.observe();
+  await h.bridge.observe();
+  assert.equal(results(h).length, 1);
+  assert.equal(results(h)[0].requested, true);
+  assert.match(results(h)[0].text, /本轮已结束/);
+  assert.doesNotMatch(results(h)[0].text, /不应发送的首轮正文/);
+  await h.bridge.sendPending();
+  assert.equal(h.notices.length, 2);
+  assert.equal(h.notices.some(n => n.text.includes('不应发送的首轮正文')), false);
+});
+
 testCreationModes('new chat stays subscribed for a later desktop turn without repeating the first requested result', async (t, mode) => {
   const h = await fixture(t);
   await h.receive(raw(1, mode.command));

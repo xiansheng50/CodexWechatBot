@@ -107,11 +107,18 @@ export class Bridge {
     });
     return this.state.read().chats[threadId];
   }
+  notificationMode() { return this.config.read().notificationMode ?? 'full'; }
+  async setNotificationMode(mode) {
+    if (!['full', 'brief'].includes(mode)) throw new Error('通知模式必须是 full 或 brief');
+    await this.config.update(c => { c.notificationMode = mode; });
+  }
+  resultExpectation() { return this.notificationMode() === 'brief' ? '本轮结束后发送通知。' : '本轮结束后返回结果。'; }
   status() {
     const state = this.state.read();
     const creds = this.credentials.read();
     return { desktop: this.desktop && !this.errors.desktop ? 'connected' : 'disconnected',
       weixin: !creds.botToken ? 'not_configured' : this.errors.auth ? 'login_required' : this.config.read().boundAt ? 'connected' : 'awaiting_owner_message',
+      notificationMode: this.notificationMode(),
       selected: state.selected ? state.chats[state.selected] : null,
       subscriptions: Object.values(state.chats).filter(c => c.enabled).map(c => ({ number: c.number, title: c.title })),
       undelivered: state.notifications.filter(n => !['accepted', 'cancelled'].includes(n.status)).map(n => ({ id: n.id, status: n.status, error: n.error, transport: n.transport })),
@@ -122,7 +129,7 @@ export class Bridge {
   }
   statusText() {
     const s = this.status();
-    return `桌面：${s.desktop}\n微信：${s.weixin}\n当前目标：${s.selected ? `#${s.selected.number} ${s.selected.title}` : '未选择'}\n通知订阅：${s.subscriptions.length}\n未送达/未知：${s.undelivered.length}\n提交待确认：${s.unknownSubmissions.length}\n${Object.values(s.errors).join('\n')}`.trim();
+    return `桌面：${s.desktop}\n微信：${s.weixin}\n当前目标：${s.selected ? `#${s.selected.number} ${s.selected.title}` : '未选择'}\n通知模式：${s.notificationMode === 'brief' ? '仅通知模式' : '结果模式'}\n通知订阅：${s.subscriptions.length}\n未送达/未知：${s.undelivered.length}\n提交待确认：${s.unknownSubmissions.length}\n${Object.values(s.errors).join('\n')}`.trim();
   }
   async discover() {
     const result = await this.requireDesktop().list({ limit: 50 });
@@ -168,6 +175,10 @@ export class Bridge {
             const cmd = parseCommand(record.text);
             if (cmd.type === 'help') await this.reply(`reply:${record.id}`, HELP);
             else if (cmd.type === 'status') await this.reply(`reply:${record.id}`, this.statusText());
+            else if (cmd.type === 'mode') {
+              await this.setNotificationMode(cmd.mode);
+              await this.reply(`reply:${record.id}`, `已切换为${cmd.mode === 'brief' ? '仅通知模式' : '结果模式'}（全局），对之后生成的结束通知生效；已生成的通知保持原内容。`);
+            }
             else if (cmd.type === 'list') { await this.discover(); await this.reply(`reply:${record.id}`, listText(this.state.read(), cmd.page)); }
             else if (cmd.type === 'projects') {
               const projects = await this.requireDesktop().projects();
@@ -240,7 +251,7 @@ export class Bridge {
         row.target = result.threadId; row.status = 'submitted';
         const chat = ensureChat(s, { id: result.threadId, hostId: 'local', kind: 'codex', title: `新聊天（${projectLabel}）` });
         selectChat(s, chat);
-        addNotice(s, { id: `ack:${record.id}`, kind: 'reply', text: `已创建 #${chat.number}（项目：${projectLabel}），已切换为当前目标并开启持续完成通知。首条要求已受理，本轮结束后返回结果。` });
+        addNotice(s, { id: `ack:${record.id}`, kind: 'reply', text: `已创建 #${chat.number}（项目：${projectLabel}），已切换为当前目标并开启持续完成通知。首条要求已受理，${this.resultExpectation()}` });
       });
     } catch {
       await this.state.update(s => {
@@ -335,7 +346,7 @@ export class Bridge {
           continue;
         }
         m.turnId = turn.id; m.status = 'confirmed';
-        addNotice(s, { id: `ack:${m.id}`, kind: 'reply', text: `已确认转入 #${current.number} ${current.title}。本轮结束后返回结果。` });
+        addNotice(s, { id: `ack:${m.id}`, kind: 'reply', text: `已确认转入 #${current.number} ${current.title}。${this.resultExpectation()}` });
       }
       const requestedTurns = s.inbound.filter(m => m.target === threadId && m.status === 'confirmed').map(m => m.turnId);
       for (const turn of turns.filter(t => isTerminal(t))) {
@@ -343,7 +354,7 @@ export class Bridge {
         if (!requested && !subscriptionTurns.some(t => t.id === turn.id)) continue;
         const selectedNumber = s.chats[s.selected]?.number;
         addNotice(s, { id: `result:${threadId}:${turn.id}`, kind: 'result', threadId, turnId: turn.id,
-          requested, text: finalText(current, turn, selectedNumber) });
+          requested, text: finalText(current, turn, selectedNumber, this.notificationMode()) });
         for (const m of s.inbound.filter(m => m.target === threadId && m.turnId === turn.id)) m.status = 'completed';
       }
       if (subscriptionUnchanged) {

@@ -99,6 +99,92 @@ test('selection stays explicit through numbered messages, subscriptions and resu
   assert.match(resultNotices(h)[0].text, /当前普通消息目标仍为 #1/);
 });
 
+test('global notification mode defaults to full, switches locally without changing chat baselines, and persists', async t => {
+  const h = await fixture(t);
+  await h.bridge.select('A');
+  await h.bridge.setNotifications('B', true);
+  await h.bridge.setNotifications('A', false);
+  assert.equal(h.bridge.notificationMode(), 'full');
+  assert.equal(h.bridge.status().notificationMode, 'full');
+  assert.match(h.bridge.statusText(), /通知模式：结果模式/);
+  const before = h.state.read();
+  h.reads.length = 0;
+  await h.receive(raw(1, '模式 仅通知'));
+  await h.dispatch();
+  assert.equal(h.bridge.notificationMode(), 'brief');
+  assert.equal(h.config.read().notificationMode, 'brief');
+  assert.equal(h.bridge.status().notificationMode, 'brief');
+  assert.match(h.bridge.statusText(), /通知模式：仅通知模式/);
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.reads.length, 0);
+  assert.equal(h.state.read().selected, before.selected);
+  assert.deepEqual(h.state.read().chats, before.chats);
+  const configBeforeInvalid = h.config.read();
+  await assert.rejects(h.bridge.setNotificationMode('invalid'));
+  assert.deepEqual(h.config.read(), configBeforeInvalid);
+  await h.restart();
+  assert.equal(h.bridge.notificationMode(), 'brief');
+  assert.deepEqual(h.state.read().chats, before.chats);
+  await h.receive(raw(2, '模式 结果'));
+  await h.dispatch();
+  assert.equal(h.bridge.notificationMode(), 'full');
+  assert.equal(h.sends.length, 0);
+  await h.restart();
+  assert.equal(h.bridge.notificationMode(), 'full');
+});
+
+test('mode applies globally only when a result notice is created and leaves saved notices intact', async t => {
+  const h = await fixture(t);
+  await h.bridge.setNotifications('A', true);
+  await h.bridge.setNotifications('B', true);
+  h.histories.set('A', [[turn('old-full', 'completed', '已保存的完整正文')]]);
+  await h.bridge.observe();
+  const savedFull = resultNotices(h)[0];
+  await h.bridge.setNotificationMode('brief');
+  h.histories.set('A', [[turn('new-A', 'completed', 'A秘密正文'), turn('old-full')]]);
+  h.histories.set('B', [[turn('new-B', 'completed', 'B秘密正文')]]);
+  await h.bridge.observe();
+  assert.deepEqual(resultNotices(h).find(n => n.turnId === 'old-full'), savedFull);
+  for (const id of ['new-A', 'new-B']) {
+    const notice = resultNotices(h).find(n => n.turnId === id);
+    assert.match(notice.text, /请在 Codex 查看结果。/);
+    assert.doesNotMatch(notice.text, /秘密正文/);
+  }
+  const savedBrief = resultNotices(h).filter(n => n.turnId !== 'old-full');
+  await h.bridge.setNotificationMode('full');
+  assert.deepEqual(resultNotices(h).filter(n => n.turnId !== 'old-full'), savedBrief);
+  h.histories.set('B', [[turn('back-full', 'completed', '恢复的完整正文'), turn('new-B')]]);
+  await h.bridge.observe();
+  assert.match(resultNotices(h).find(n => n.turnId === 'back-full').text, /恢复的完整正文/);
+  await h.bridge.sendPending();
+  assert.equal(h.notices.filter(n => n.text.includes('已保存的完整正文')).length, 1);
+  assert.equal(h.notices.some(n => /A秘密正文|B秘密正文/.test(n.text)), false);
+});
+
+test('requested turns use brief notices and acknowledgment even with their subscription disabled', async t => {
+  const h = await fixture(t);
+  await h.bridge.select('A');
+  await h.bridge.setNotifications('A', false);
+  await h.bridge.setNotificationMode('brief');
+  await h.receive(raw(1, '微信要求'));
+  await h.dispatch();
+  h.histories.set('A', [[turn('requested', 'inProgress', null, ['WECHAT_MESSAGE_ID=1'])]]);
+  await h.bridge.observe();
+  const ack = h.state.read().notifications.find(n => n.id === 'ack:1');
+  assert.match(ack.text, /本轮结束后发送通知。/);
+  assert.doesNotMatch(ack.text, /返回结果/);
+  h.histories.set('A', [[turn('requested', 'completed', '不应发送的微信结果', ['WECHAT_MESSAGE_ID=1'])]]);
+  await h.bridge.observe();
+  await h.bridge.observe();
+  assert.equal(h.state.read().chats.A.enabled, false);
+  assert.equal(h.state.read().selected, 'A');
+  assert.equal(resultNotices(h).length, 1);
+  assert.equal(resultNotices(h)[0].requested, true);
+  assert.equal(resultNotices(h)[0].text, '[#1 聊天A] 本轮已结束，请在 Codex 查看结果。');
+  await h.bridge.sendPending();
+  assert.equal(h.notices.some(n => n.text.includes('不应发送的微信结果')), false);
+});
+
 test('targets are frozen in reception order before later selection commands and restart', async t => {
   const h = await fixture(t);
   await h.bridge.select('A');
@@ -256,6 +342,7 @@ test('submission marker associates with actual new turn instead of previous comp
   await h.bridge.observe();
   assert.equal(h.state.read().inbound[0].turnId, 'new');
   assert.equal(resultNotices(h).length, 0);
+  assert.match(h.state.read().notifications.find(n => n.id === 'ack:1').text, /本轮结束后返回结果。/);
   h.histories.set('A', [[turn('new', 'completed', '本轮答案', ['WECHAT_MESSAGE_ID=1']), turn('old')]]);
   await h.bridge.observe();
   assert.equal(resultNotices(h)[0].turnId, 'new');

@@ -1,10 +1,11 @@
-export const HELP = '列表 [页码]\n项目 [页码]\n新建｜首条要求（无项目，成功后自动切换）\n新建 项目名｜首条要求（成功后自动切换）\n切换 #3\n#3 你的要求（单次，不切换目标）\n通知 #3 开 / 通知 #3 关\n状态 / 帮助\n新建或切换成功时开启目标的持续通知，关闭原目标的持续通知。\n普通文字发给上次明确选择的聊天。';
+export const HELP = '列表 [页码]\n项目 [页码]\n新建｜首条要求（无项目，成功后自动切换）\n新建 项目名｜首条要求（成功后自动切换）\n切换 #3\n#3 你的要求（单次，不切换目标）\n通知 #3 开 / 通知 #3 关\n模式 结果 / 模式 仅通知（全局）\n状态 / 帮助\n新建或切换成功时开启目标的持续通知，关闭原目标的持续通知。\n普通文字发给上次明确选择的聊天。';
 
 export function parseCommand(text) {
   text = text.trim();
   let m;
   if (text === '帮助') return { type: 'help' };
   if (text === '状态') return { type: 'status' };
+  if ((m = /^模式\s+(结果|仅通知)$/.exec(text))) return { type: 'mode', mode: m[1] === '结果' ? 'full' : 'brief' };
   if ((m = /^项目(?:\s+([1-9]\d*))?$/.exec(text))) return { type: 'projects', page: Number(m[1] || 1) };
   if (/^新建(?:\s|[|｜]|$)/.test(text)) {
     m = /^新建(?:\s+([^|｜\r\n]*))?[|｜]([\s\S]*)$/.exec(text);

@@ -11,7 +11,10 @@ test('commands require complete matches and numbered messages do not imply selec
   assert.deepEqual(parseCommand('#3 请补充\n测试'), { type: 'message', number: 3, text: '请补充\n测试' });
   assert.deepEqual(parseCommand('通知 #3 关'), { type: 'notifications', number: 3, enabled: false });
   assert.deepEqual(parseCommand('列表 2'), { type: 'list', page: 2 });
-  for (const text of ['切换 #3 然后继续', '通知 #3 开始', '列表 0', '帮助我检查']) {
+  assert.deepEqual(parseCommand(' 模式 结果 '), { type: 'mode', mode: 'full' });
+  assert.deepEqual(parseCommand('模式 仅通知'), { type: 'mode', mode: 'brief' });
+  for (const text of ['切换 #3 然后继续', '通知 #3 开始', '列表 0', '帮助我检查',
+    '模式 结果 然后继续', '模式 仅通知模式', '模式 brief', '模式']) {
     assert.deepEqual(parseCommand(text), { type: 'message', text });
   }
 });
@@ -122,4 +125,14 @@ test('all terminal states retain the no-final-text hint for empty or nonfinal me
     assert.match(text, /本轮没有最终文字回复，请回桌面查看实际状态。/);
     assert.doesNotMatch(text, /过程文字/);
   }
+});
+
+test('brief notices describe every terminal state without including final answers or full-mode hints', () => {
+  for (const [status, label] of [['completed', '本轮已结束'], ['failed', '执行失败'], ['interrupted', '已中断']]) {
+    for (const items of [[], [{ type: 'agentMessage', phase: 'final_answer', text: '不得发送的正文' }]]) {
+      const text = finalText({ number: 3, title: '测试' }, { status, items }, 7, 'brief');
+      assert.equal(text, `[#3 测试] ${label}，请在 Codex 查看结果。`);
+    }
+  }
+  assert.throws(() => finalText({ number: 3, title: '测试' }, { status: 'inProgress', items: [] }, 7, 'brief'), /not terminal/);
 });

@@ -107,6 +107,18 @@ test('daemon restart revalidates a saved candidate and preserves chat number and
   assert.equal(state.selected.threadId, 'main');
 });
 
+test('global notification mode is visible through local status and survives daemon restart', async t => {
+  const f = await fixture(t);
+  assert.equal((await localCall(f.dir, '/status')).notificationMode, 'full');
+  await f.service.bridge.setNotificationMode('brief');
+  await f.restart();
+  const status = await localCall(f.dir, '/status');
+  assert.equal(status.notificationMode, 'brief');
+  assert.equal(status.selected, null);
+  assert.deepEqual(status.subscriptions, []);
+  assert.equal(JSON.parse(await readFile(join(f.dir, 'config.json'), 'utf8')).notificationMode, 'brief');
+});
+
 test('same-pipe caller registration does not close a transport with ongoing work', async t => {
   const f = await fixture(t);
   const connection = { pipePath: '\\\\.\\pipe\\test-bridge', hostId: 'local', callerThreadId: 'main' };
