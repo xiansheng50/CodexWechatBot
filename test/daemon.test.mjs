@@ -189,12 +189,14 @@ test('formal stdio MCP forwards distinct calling chats through the authenticated
   const b = await call('second', 'wechat_status');
   assert.equal(b.caller.threadId, 'second');
   assert.notEqual(a.chat.number, b.chat.number);
+  await call('main', 'wechat_select_current_chat');
   await call('main', 'wechat_set_notifications', { enabled: true });
   await call('second', 'wechat_select_current_chat');
   const s = await localCall(f.dir, '/status');
   assert.equal(s.selected.threadId, 'second');
   assert.equal(s.subscriptions.length, 1);
-  assert.equal(s.subscriptions[0].number, a.chat.number);
-  await call('main', 'wechat_set_notifications', { enabled: false });
+  assert.equal(s.subscriptions[0].number, b.chat.number);
+  assert.equal((await call('main', 'wechat_status')).chat.enabled, false);
+  await call('second', 'wechat_set_notifications', { enabled: false });
   assert.equal((await localCall(f.dir, '/status')).subscriptions.length, 0);
 });

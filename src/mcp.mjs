@@ -35,7 +35,7 @@ const startup = (async () => {
 
 const tools = [
   { name: 'wechat_set_notifications', description: '仅在用户明确要求时，为当前调用聊天持续开启或关闭微信完成通知。', inputSchema: { type: 'object', properties: { enabled: { type: 'boolean' } }, required: ['enabled'], additionalProperties: false } },
-  { name: 'wechat_select_current_chat', description: '仅在用户明确要求时，把当前调用聊天设为微信普通消息目标。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'wechat_select_current_chat', description: '仅在用户明确要求时，把当前调用聊天设为微信普通消息目标，开启其持续完成通知，并关闭原目标的持续完成通知。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
   { name: 'wechat_status', description: '读取微信桥接状态及当前调用聊天身份；不改变通知或选择。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
 ];
 const server = new Server({ name: 'wechatbot', version: '0.1.0' }, { capabilities: { tools: {} } });

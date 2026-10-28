@@ -83,10 +83,12 @@ async function fixture(t, { unsupported = false, noProjectListing = false } = {}
   return h;
 }
 
-test('create persists intent before the external write and selects its stable numbered chat without subscribing', async t => {
+test('create persists intent before the external write and selects and subscribes its stable numbered chat', async t => {
   const h = await fixture(t);
   await h.bridge.setNotifications('A', true);
   const previousObservation = h.state.read().chats.A;
+  const readsBeforeCreate = h.reads.length;
+  const beforeCreate = Date.now();
   h.onCreate = async (projectId, prompt) => {
     const saved = JSON.parse(await readFile(join(h.directory, 'state.json'), 'utf8'));
     const row = saved.inbound.find(m => m.id === '1');
@@ -108,19 +110,25 @@ test('create persists intent before the external write and selects its stable nu
   assert.equal(saved.selected, 'NEW');
   assert.equal(saved.chats.NEW.number, 2);
   assert.match(saved.chats.NEW.title, /新聊天.*示例项目/);
-  assert.equal(saved.chats.NEW.enabled, false);
-  assert.deepEqual(saved.chats.A, previousObservation);
+  assert.equal(saved.chats.NEW.enabled, true);
+  assert.deepEqual(saved.chats.NEW.observation, { anchor: null, pending: [] });
+  assert.ok(Date.parse(saved.chats.NEW.enabledAt) >= beforeCreate);
+  assert.ok(Date.parse(saved.chats.NEW.enabledAt) <= Date.now());
+  assert.equal(h.reads.length, readsBeforeCreate, 'creation enables notification without an extra desktop read');
+  assert.deepEqual(saved.chats.A, { ...previousObservation, enabled: false });
   assert.equal(createdAcks(h).length, 1);
   assert.equal(results(h).length, 0, 'create acceptance is not a completed turn');
 });
 
-test('projectless creation persists intent and selects the new chat without project listing or subscriptions', async t => {
+test('projectless creation persists intent and selects and subscribes the new chat without project listing', async t => {
   for (const command of ['新建｜首条要求', '新建 | 首条要求']) {
     await t.test(command, async t => {
       const h = await fixture(t, { noProjectListing: true });
       h.projects = [];
       await h.bridge.setNotifications('A', true);
       const previousObservation = h.state.read().chats.A;
+      const readsBeforeCreate = h.reads.length;
+      const beforeCreate = Date.now();
       h.onCreate = async (projectId, prompt) => {
         const saved = JSON.parse(await readFile(join(h.directory, 'state.json'), 'utf8'));
         const row = saved.inbound[0];
@@ -142,12 +150,31 @@ test('projectless creation persists intent and selects the new chat without proj
       assert.equal(saved.selected, 'NEW');
       assert.equal(saved.chats.NEW.number, 2);
       assert.match(saved.chats.NEW.title, /新聊天.*无项目/);
-      assert.equal(saved.chats.NEW.enabled, false);
-      assert.deepEqual(saved.chats.A, previousObservation);
+      assert.equal(saved.chats.NEW.enabled, true);
+      assert.deepEqual(saved.chats.NEW.observation, { anchor: null, pending: [] });
+      assert.ok(Date.parse(saved.chats.NEW.enabledAt) >= beforeCreate);
+      assert.ok(Date.parse(saved.chats.NEW.enabledAt) <= Date.now());
+      assert.equal(h.reads.length, readsBeforeCreate, 'creation enables notification without an extra desktop read');
+      assert.deepEqual(saved.chats.A, { ...previousObservation, enabled: false });
       assert.equal(createdAcks(h).length, 1);
       assert.equal(results(h).length, 0);
     });
   }
+});
+
+testCreationModes('successful creation cancels previous subscription notices and preserves requested results', async (t, mode) => {
+  const h = await fixture(t);
+  await h.state.update(s => {
+    s.notifications.push(
+      { id: 'old-subscription', kind: 'result', threadId: 'A', turnId: 'old-desktop', requested: false, status: 'pending', text: '桌面结果' },
+      { id: 'old-requested', kind: 'result', threadId: 'A', turnId: 'old-wechat', requested: true, status: 'pending', text: '微信要求的结果' });
+  });
+  await h.receive(raw(1, mode.command));
+  assert.equal(h.state.read().notifications.find(n => n.id === 'old-subscription').status, 'cancelled');
+  assert.equal(h.state.read().notifications.find(n => n.id === 'old-requested').status, 'pending');
+  await h.bridge.sendPending();
+  assert.equal(h.notices.filter(n => n.text === '微信要求的结果').length, 1);
+  assert.equal(h.notices.some(n => n.text === '桌面结果'), false);
 });
 
 testCreationModes('ordinary messages bind in reception order around creation and use the minimal marker header', async (t, mode) => {
@@ -190,6 +217,7 @@ test('unknown, ambiguous and remote project selectors reject without falling thr
   for (const scenario of ['unknown', 'ambiguous', 'remote']) {
     await t.test(scenario, async t => {
       const h = await fixture(t);
+      const previousChat = h.state.read().chats.A;
       if (scenario === 'ambiguous') h.projects.push(project({ projectId: 'another', path: 'D:\\Other\\Demo' }));
       if (scenario === 'remote') h.projects = [project({ projectKind: 'remote', hostId: 'remote-host' })];
       await h.receive(raw(1, `新建 ${scenario === 'unknown' ? 'Dem' : '示例项目'}｜首条要求`));
@@ -198,6 +226,7 @@ test('unknown, ambiguous and remote project selectors reject without falling thr
       assert.equal(h.sends.length, 0);
       assert.equal(h.state.read().selected, 'A');
       assert.equal(h.state.read().inbound[0].status, 'rejected');
+      assert.deepEqual(h.state.read().chats.A, previousChat);
       assert.ok(h.state.read().notifications.some(n => /未执行/.test(n.text)));
     });
   }
@@ -215,12 +244,14 @@ test('malformed new-chat commands never become tasks in the previous target', as
 
 testCreationModes('unsupported creation preserves the old target and reports rejection', async (t, mode) => {
   const h = await fixture(t, { unsupported: true });
+  const previousChat = h.state.read().chats.A;
   await h.receive(raw(1, mode.command));
   await h.dispatch();
   assert.equal(h.state.read().inbound[0].status, 'rejected');
   assert.equal(h.state.read().selected, 'A');
   assert.equal(h.sends.length, 0);
   assert.match(h.state.read().notifications[0].text, /未执行/);
+  assert.deepEqual(h.state.read().chats.A, previousChat);
 });
 
 testCreationModes('duplicate creation batches and restart preserve a single external create and stable chat number', async (t, mode) => {
@@ -262,6 +293,34 @@ testCreationModes('actual create_thread delegation associates the created turn a
   assert.equal(h.notices.length, 2);
 });
 
+testCreationModes('new chat stays subscribed for a later desktop turn without repeating the first requested result', async (t, mode) => {
+  const h = await fixture(t);
+  await h.receive(raw(1, mode.command));
+  const first = initialTurn('first-turn', 'WECHAT_MESSAGE_ID=1', 'completed', '首轮结果');
+  h.histories.set('NEW', [[first]]);
+  await h.bridge.observe();
+  await h.bridge.sendPending();
+  const later = { id: 'desktop-turn', status: 'inProgress', items: [
+    { type: 'userMessage', content: [{ type: 'text', text: '电脑端继续' }] },
+  ] };
+  h.histories.set('NEW', [[later, first]]);
+  await h.bridge.observe();
+  assert.equal(results(h).length, 1, 'unfinished desktop turn has no result');
+  later.status = 'completed';
+  later.items.push({ type: 'agentMessage', phase: 'final_answer', text: '电脑端最终结果' });
+  h.histories.set('NEW', [[later, first]]);
+  await h.bridge.observe();
+  await h.bridge.observe();
+  await h.bridge.sendPending();
+  await h.bridge.sendPending();
+  assert.deepEqual(results(h).map(n => ({ turnId: n.turnId, requested: n.requested, status: n.status })), [
+    { turnId: 'first-turn', requested: true, status: 'accepted' },
+    { turnId: 'desktop-turn', requested: false, status: 'accepted' },
+  ]);
+  assert.equal(h.notices.length, 3, 'one creation acknowledgement and one result per completed turn');
+  assert.equal(h.notices.filter(n => n.text.includes('电脑端最终结果')).length, 1);
+});
+
 test('initial userMessage first-line marker remains compatible with creation observation', async t => {
   const h = await fixture(t);
   await h.receive(raw(1, '新建 示例项目｜首条要求'));
@@ -293,7 +352,8 @@ test('creation observation rejects wrong-tool, truncated and quoted delegation m
       await h.bridge.observe();
       assert.equal(h.state.read().inbound[0].status, 'submitted');
       assert.equal(h.state.read().inbound[0].turnId, undefined);
-      assert.equal(results(h).length, 0);
+      assert.equal(results(h).length, 1);
+      assert.equal(results(h)[0].requested, false, 'subscription result must not confirm the create request');
     });
   }
 });
@@ -307,7 +367,8 @@ test('an unrelated completed turn or a marker quoted in a later userMessage cann
   ] }]]);
   await h.bridge.observe();
   assert.equal(h.state.read().inbound[0].status, 'submitted');
-  assert.equal(results(h).length, 0);
+  assert.equal(results(h).length, 1);
+  assert.equal(results(h)[0].requested, false);
 });
 
 test('legacy delivery output remains recoverable alongside the new userMessage marker', async t => {
@@ -327,6 +388,7 @@ testCreationModes('unknown create responses preserve selection, survive replay a
   for (const response of ['throw', {}, { threadId: '' }, { threadId: '   ' }, { threadId: 'NEW', hostId: 'remote-host' }]) {
     await t.test(JSON.stringify(response), async t => {
       const h = await fixture(t);
+      const previousChat = h.state.read().chats.A;
       h.onCreate = async () => { if (response === 'throw') throw Error('lost after write'); return response; };
       const message = raw(1, mode.command);
       await h.receive(message);
@@ -334,6 +396,7 @@ testCreationModes('unknown create responses preserve selection, survive replay a
       assert.equal(h.state.read().inbound[0].status, 'unknown');
       assert.equal(h.state.read().inbound[0].target, undefined);
       assert.equal(h.state.read().chats.NEW, undefined);
+      assert.deepEqual(h.state.read().chats.A, previousChat);
       assert.equal(h.state.read().selected, 'A');
       assert.match(h.state.read().notifications.map(n => n.text).join('\n'), /桌面|电脑/);
       await h.restart();

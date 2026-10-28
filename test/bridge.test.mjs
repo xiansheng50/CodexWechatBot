@@ -108,8 +108,80 @@ test('targets are frozen in reception order before later selection commands and 
   await h.restart();
   assert.equal(h.bridge.status().desktop, 'connected');
   assert.equal(h.state.read().selected, 'B');
+  assert.equal(h.state.read().chats.A.enabled, false);
+  assert.equal(h.state.read().chats.B.enabled, true);
   await h.dispatch();
   assert.deepEqual(h.sends.map(m => m.id).sort(), ['A', 'B']);
+});
+
+test('switching subscribes the new target, stops old subscription notices and still returns old WeChat requests', async t => {
+  const h = await fixture(t);
+  await h.bridge.select('A');
+  h.histories.set('A', [[turn('desktop-only')]]);
+  await h.bridge.observe();
+  await h.receive(raw(1, '旧聊天的微信要求'));
+  await h.dispatch();
+  h.histories.set('A', [[turn('requested', 'inProgress', null, ['WECHAT_MESSAGE_ID=1']), turn('desktop-only')]]);
+  await h.bridge.observe();
+  h.histories.set('B', [[turn('B-old')]]);
+  h.threads.set('C', thread('C'));
+  await h.bridge.setNotifications('C', true);
+  const independentSubscription = h.state.read().chats.C;
+  await h.bridge.chatCurrent('B');
+  h.reads.length = 0;
+  await h.receive(raw(2, '切换 #3'));
+  const saved = h.state.read();
+  assert.equal(saved.selected, 'B');
+  assert.equal(saved.chats.A.enabled, false);
+  assert.equal(saved.chats.B.enabled, true);
+  assert.deepEqual(saved.chats.B.observation, { anchor: 'B-old', pending: [] });
+  assert.deepEqual(saved.chats.C, independentSubscription);
+  assert.equal(resultNotices(h).find(n => n.turnId === 'desktop-only').status, 'cancelled');
+  assert.deepEqual(h.reads.map(r => r.id), ['B']);
+  assert.match(saved.notifications.find(n => n.id === 'reply:2').text, /持续完成通知已开启/);
+  h.histories.set('A', [[turn('A-later'), turn('requested', 'completed', '旧聊天的微信结果', ['WECHAT_MESSAGE_ID=1']), turn('desktop-only')]]);
+  h.histories.set('B', [[turn('B-new'), turn('B-old')]]);
+  await h.bridge.observe();
+  await h.bridge.observe();
+  const activeResults = resultNotices(h).filter(n => n.status !== 'cancelled');
+  assert.deepEqual(activeResults.map(n => n.turnId).sort(), ['B-new', 'requested']);
+  assert.equal(activeResults.find(n => n.turnId === 'requested').requested, true);
+  assert.equal(activeResults.find(n => n.turnId === 'B-new').requested, false);
+  await h.bridge.sendPending();
+  assert.equal(h.notices.filter(n => n.text.includes('旧聊天的微信结果')).length, 1);
+  assert.equal(h.notices.some(n => n.text.includes('结果desktop-only')), false);
+});
+
+test('reselecting preserves an enabled baseline and only an explicit selection reopens a manually disabled target', async t => {
+  const h = await fixture(t);
+  h.histories.set('A', [[turn('old')]]);
+  await h.bridge.select('A');
+  const before = h.state.read().chats.A;
+  h.histories.set('A', [[turn('new'), turn('old')]]);
+  await h.bridge.select('A');
+  assert.deepEqual(h.state.read().chats.A, before);
+  await h.bridge.observe();
+  assert.deepEqual(resultNotices(h).map(n => n.turnId), ['new']);
+  await h.bridge.setNotifications('A', false);
+  await h.bridge.chatCurrent('A');
+  await h.bridge.discover();
+  await h.restart();
+  assert.equal(h.state.read().chats.A.enabled, false);
+  await h.bridge.select('A');
+  assert.equal(h.state.read().chats.A.enabled, true);
+  assert.deepEqual(h.state.read().chats.A.observation, { anchor: 'new', pending: [] });
+  h.histories.set('A', [[turn('after-reselect'), turn('new'), turn('old')]]);
+  await h.bridge.observe();
+  assert.deepEqual(resultNotices(h).filter(n => n.status !== 'cancelled').map(n => n.turnId), ['after-reselect']);
+});
+
+test('an unavailable selection leaves the previous target and its subscription unchanged', async t => {
+  const h = await fixture(t);
+  await h.bridge.select('A');
+  const before = h.state.read();
+  h.threads.set('B', thread('B', { archived: true }));
+  await assert.rejects(h.bridge.select('B'), /本地主聊天/);
+  assert.deepEqual(h.state.read(), before);
 });
 
 test('no selection, unknown number, foreign sender and media never submit desktop writes', async t => {
@@ -176,8 +248,8 @@ test('multiple busy-chat additions are submitted without waiting for a terminal 
 
 test('submission marker associates with actual new turn instead of previous completed answer', async t => {
   const h = await fixture(t);
-  await h.bridge.select('A');
   h.histories.set('A', [[turn('old', 'completed', '上一轮答案')]]);
+  await h.bridge.select('A');
   await h.receive(raw(1, '下一轮要求'));
   await h.dispatch();
   h.histories.set('A', [[turn('new', 'inProgress', null, ['WECHAT_MESSAGE_ID=1']), turn('old', 'completed', '上一轮答案')]]);
@@ -265,6 +337,7 @@ test('observation pages to both its anchor and an older unfinished subscribed tu
 test('confirmed requested turn outside the latest page is followed until it terminates', async t => {
   const h = await fixture(t);
   await h.bridge.select('A');
+  await h.bridge.setNotifications('A', false);
   await h.receive(raw(1, '微信要求'));
   await h.dispatch();
   h.histories.set('A', [[turn('requested', 'inProgress', null, ['WECHAT_MESSAGE_ID=1'])]]);

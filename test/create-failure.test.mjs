@@ -52,7 +52,13 @@ async function fixture(t) {
       desktopFactory: () => desktop });
     await h.bridge.init();
     await h.bridge.register({ callerThreadId: 'A', pipePath: 'test-only' });
-    await h.state.update(s => { s.selected ||= 'A'; });
+    await h.state.update(s => {
+      if (!s.selected) {
+        s.selected = 'A';
+        Object.assign(s.chats.A, { enabled: true, enabledAt: new Date().toISOString(),
+          observation: { anchor: null, pending: [] } });
+      }
+    });
   };
   await h.restart();
   h.persisted = async () => JSON.parse(await readFile(path, 'utf8'));
@@ -105,7 +111,8 @@ test('a failed receipt save retains the known created chat for read-only recover
   assert.equal(completed.chats.NEW.enabled, false);
   assert.equal(completed.selected, 'A');
   assert.deepEqual(completed.chats.A, previousChat);
-  assert.deepEqual(h.reads, ['NEW', 'NEW']);
+  assert.deepEqual(h.reads.filter(id => id === 'NEW'), ['NEW', 'NEW']);
+  assert.ok(h.reads.every(id => ['A', 'NEW'].includes(id)));
   assert.equal(h.creates, 1);
   const results = completed.notifications.filter(n => n.kind === 'result');
   assert.equal(results.length, 1);
@@ -116,6 +123,12 @@ test('a failed receipt save retains the known created chat for read-only recover
 
 test('a failed creation receipt save and failed unknown notice do not report not-executed or create again', async t => {
   const h = await fixture(t);
+  const previousChat = h.state.read().chats.A;
+  const previousNotices = [
+    { id: 'previous-subscription', kind: 'result', threadId: 'A', requested: false, status: 'pending', text: '原订阅结果' },
+    { id: 'previous-requested', kind: 'result', threadId: 'A', requested: true, status: 'pending', text: '原请求结果' },
+  ];
+  await h.state.update(s => s.notifications.push(...previousNotices));
   let receiptFailed = false, unknownNoticeFailed = false;
   h.beforeWrite = async value => {
     if (!receiptFailed && value.inbound[0]?.status === 'submitted') {
@@ -133,6 +146,9 @@ test('a failed creation receipt save and failed unknown notice do not report not
   assert.equal((await h.persisted()).inbound[0].status, 'unknown');
   assert.equal(h.state.read().notifications.some(n => /未执行/.test(n.text)), false);
   assert.equal(h.state.read().selected, 'A');
+  assert.deepEqual(h.state.read().chats.A, previousChat);
+  assert.equal(h.state.read().chats.NEW.enabled, false);
+  assert.deepEqual(h.state.read().notifications.filter(n => n.threadId === 'A'), previousNotices);
   await h.restart();
   await h.bridge.acceptBatch(batch);
   await h.bridge.processInbound();
@@ -143,6 +159,7 @@ test('a failed creation receipt save and failed unknown notice do not report not
 
 test('persistent local write failure after external creation recovers as unknown without retrying creation', async t => {
   const h = await fixture(t);
+  const previousChat = h.state.read().chats.A;
   h.onCreate = async () => {
     h.beforeWrite = async () => { throw new Error('Injected disk failure after dispatch'); };
     return { threadId: 'NEW', hostId: 'local' };
@@ -157,6 +174,9 @@ test('persistent local write failure after external creation recovers as unknown
   await Promise.all(h.bridge.dispatchReady());
   assert.equal(h.creates, 1);
   assert.equal(h.state.read().inbound[0].status, 'unknown');
+  assert.equal(h.state.read().selected, 'A');
+  assert.deepEqual(h.state.read().chats.A, previousChat);
+  assert.equal(h.state.read().chats.NEW, undefined);
   assert.equal(h.state.read().notifications.some(n => /未执行/.test(n.text)), false);
 });
 
@@ -180,6 +200,8 @@ test('stopping while the pre-dispatch intent saves leaves the unsent create resu
   assert.equal(h.creates, 1);
   assert.equal(h.state.read().inbound[0].status, 'submitted');
   assert.equal(h.state.read().selected, 'NEW');
+  assert.equal(h.state.read().chats.NEW.enabled, true);
+  assert.equal(h.state.read().chats.A.enabled, false);
 });
 
 test('stopping after dispatch records an uncertain create without starting the next create', async t => {

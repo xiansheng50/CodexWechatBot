@@ -8,6 +8,26 @@ import { resolveProject, projectListText } from './projects.mjs';
 export const INITIAL_STATE = { version: 1, nextNumber: 1, chats: {}, selected: null,
   desktopCandidate: null, cursor: '', inbound: [], notifications: [] };
 
+function updateNotifications(state, chat, enabled, turns = []) {
+  if (chat.enabled === enabled) return;
+  chat.enabled = enabled;
+  if (enabled) {
+    chat.enabledAt = new Date().toISOString();
+    chat.observation = { anchor: turns[0]?.id || null,
+      pending: turns.filter(t => !isTerminal(t)).map(t => t.id) };
+    delete chat.observationGap;
+  } else {
+    for (const n of state.notifications) if (n.threadId === chat.threadId && n.kind === 'result' && n.status === 'pending' && !n.requested) n.status = 'cancelled';
+  }
+}
+
+function selectChat(state, chat, turns = []) {
+  const previous = state.chats[state.selected];
+  if (previous && previous.threadId !== chat.threadId) updateNotifications(state, previous, false);
+  updateNotifications(state, chat, true, turns);
+  state.selected = chat.threadId;
+}
+
 export class Bridge {
   constructor({ state, credentials, config, weixin, desktopFactory = c => new DesktopClient(c), log = () => {} }) {
     Object.assign(this, { state, credentials, config, weixin, desktopFactory, log });
@@ -75,7 +95,7 @@ export class Bridge {
   }
   async select(threadId, connection = this.connection) {
     const data = await this.readChat(threadId, { turnLimit: 1, includeOutputs: false }, connection);
-    await this.state.update(s => { this.rememberChat(s, data.thread, connection); s.selected = threadId; });
+    await this.state.update(s => { selectChat(s, this.rememberChat(s, data.thread, connection), data.turns); });
     return this.state.read().chats[threadId];
   }
   async setNotifications(threadId, enabled, connection = this.connection) {
@@ -83,16 +103,7 @@ export class Bridge {
     const data = await this.readChat(threadId, { turnLimit: 1, includeOutputs: false }, connection);
     await this.state.update(s => {
       const chat = this.rememberChat(s, data.thread, connection);
-      if (chat.enabled === enabled) return;
-      chat.enabled = enabled;
-      if (enabled) {
-        chat.enabledAt = new Date().toISOString();
-        chat.observation = { anchor: data.turns[0]?.id || null,
-          pending: data.turns.filter(t => !isTerminal(t)).map(t => t.id) };
-        delete chat.observationGap;
-      } else {
-        for (const n of s.notifications) if (n.threadId === threadId && n.kind === 'result' && n.status === 'pending' && !n.requested) n.status = 'cancelled';
-      }
+      updateNotifications(s, chat, enabled, data.turns);
     });
     return this.state.read().chats[threadId];
   }
@@ -166,7 +177,7 @@ export class Bridge {
             else if (cmd.type === 'select') {
               const chat = byNumber(this.state.read(), cmd.number);
               await this.select(chat.threadId);
-              await this.reply(`reply:${record.id}`, `已选择 #${chat.number} ${chat.title}，普通文字将发给此聊天。`);
+              await this.reply(`reply:${record.id}`, `已选择 #${chat.number} ${chat.title}，普通文字将发给此聊天，持续完成通知已开启。`);
             } else if (cmd.type === 'notifications') {
               const chat = byNumber(this.state.read(), cmd.number);
               await this.setNotifications(chat.threadId, cmd.enabled);
@@ -228,8 +239,8 @@ export class Bridge {
         const row = s.inbound.find(m => m.id === record.id);
         row.target = result.threadId; row.status = 'submitted';
         const chat = ensureChat(s, { id: result.threadId, hostId: 'local', kind: 'codex', title: `新聊天（${projectLabel}）` });
-        s.selected = chat.threadId;
-        addNotice(s, { id: `ack:${record.id}`, kind: 'reply', text: `已创建 #${chat.number}（项目：${projectLabel}），已切换为当前目标。首条要求已受理，本轮结束后返回结果。` });
+        selectChat(s, chat);
+        addNotice(s, { id: `ack:${record.id}`, kind: 'reply', text: `已创建 #${chat.number}（项目：${projectLabel}），已切换为当前目标并开启持续完成通知。首条要求已受理，本轮结束后返回结果。` });
       });
     } catch {
       await this.state.update(s => {
