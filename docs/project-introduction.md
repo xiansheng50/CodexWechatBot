@@ -16,11 +16,11 @@ CodexWechatBot 是一个连接本人微信 ClawBot 与电脑上 Codex Desktop �
 ## 怎样开始使用
 
 1. 准备一台联网的 Windows 电脑，安装并登录 Codex Desktop；运行环境以 Node.js 24 为已验证基线。
-2. 把[仓库地址](https://github.com/xiansheng50/CodexWechatBot)交给这台电脑上的 Codex，并明确要求：“请按仓库中的新设备操作文档，安装并运行这个项目。”仓库为私有仓库，需要有访问权限的 GitHub 账号。
+2. 把[仓库地址](https://github.com/xiansheng50/CodexWechatBot)交给这台电脑上的 Codex，并明确要求：“请按仓库中的新设备操作文档，安装并运行这个项目。”仓库为公开项目，克隆无需 GitHub 登录；如果当前网络或企业策略限制访问，按实际网络要求处理。
 3. 按提示完成必要的授权、微信扫码和 Codex 重启，然后在手机 ClawBot 发送“帮助”，确认能够收到回复。
 4. 在想使用的 Codex 聊天里说：“把这个聊天设为微信消息目标，并开启这个聊天的微信完成通知。”再从微信发送“状态”和一条普通文字，确认收发正常。
 
-克隆、安装和配置可以交给 Codex 操作；账号授权、扫码和手机收发确认仍需要本人参与。详细步骤见[新设备安装与运行文档](new-device-setup.md)。
+克隆、安装和配置可以交给 Codex 操作；微信扫码、必要的系统交互和手机收发确认仍需要本人参与。详细步骤见[新设备安装与运行文档](new-device-setup.md)，已有安装的更新方式见[升级说明](new-device-setup.md#9-已有安装升级)。
 
 ## 微信里常用的命令
 
