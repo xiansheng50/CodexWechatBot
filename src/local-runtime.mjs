@@ -36,16 +36,39 @@ async function ownershipGuard(dir, operation) {
 
 function validateOwner(owner) {
   if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !uuid.test(owner.instanceId) ||
-      typeof owner.startedAt !== 'string' || !Number.isFinite(Date.parse(owner.startedAt))) {
+      typeof owner.startedAt !== 'string' || !Number.isFinite(Date.parse(owner.startedAt)) ||
+      owner.processStartedAt !== undefined && !validProcessTime(owner.processStartedAt)) {
     throw new Error('Invalid ownership file; refusing automatic recovery');
   }
   return owner;
 }
 
-export async function acquireOwnership(dir) {
+function validProcessTime(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z$/.test(value)) return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString().slice(0, 19) === value.slice(0, 19);
+}
+
+export async function getWindowsProcessStartedAt(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) throw new Error('Invalid process id');
+  const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+    fileURLToPath(new URL('../scripts/process-started-at.ps1', import.meta.url)), '-ProcessId', String(pid)], { windowsHide: true, timeout: 10000 });
+  const value = stdout.trim();
+  if (!validProcessTime(value)) throw new Error('Cannot verify process creation time');
+  return value;
+}
+
+export async function acquireOwnership(dir, { getProcessStartedAt = process.platform === 'win32' ? getWindowsProcessStartedAt : null } = {}) {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const path = join(dir, 'owner.lock');
-  const owner = { pid: process.pid, instanceId: randomUUID(), startedAt: new Date().toISOString() };
+  async function processTime(pid) {
+    const value = await getProcessStartedAt(pid);
+    if (!validProcessTime(value)) throw new Error('Cannot verify process creation time; refusing automatic recovery');
+    return value;
+  }
+  const ownProcessStartedAt = getProcessStartedAt ? await processTime(process.pid) : undefined;
+  const owner = { pid: process.pid, instanceId: randomUUID(), startedAt: new Date().toISOString(),
+    ...(ownProcessStartedAt ? { processStartedAt: ownProcessStartedAt } : {}) };
   await ownershipGuard(dir, async () => {
     let existing;
     try { existing = validateOwner(JSON.parse(await readFile(path, 'utf8'))); }
@@ -54,6 +77,15 @@ export async function acquireOwnership(dir) {
       try { process.kill(existing.pid, 0); }
       catch (error) { if (error.code !== 'ESRCH') throw new Error('Cannot prove previous owner has exited', { cause: error });
         await unlink(path); existing = null;
+      }
+      if (existing && getProcessStartedAt) {
+        const currentStartedAt = existing.pid === process.pid ? ownProcessStartedAt : await processTime(existing.pid);
+        const replaced = existing.processStartedAt !== undefined
+          ? Date.parse(currentStartedAt) !== Date.parse(existing.processStartedAt)
+          : Date.parse(currentStartedAt) > Date.parse(existing.startedAt);
+        // A live PID can belong to a different process after the owner exits.
+        // Legacy locks lack the birth time; a later birth still proves reuse.
+        if (replaced) { await unlink(path); existing = null; }
       }
       if (existing) throw new Error(`Daemon ownership is held by process ${existing.pid}`);
     }
