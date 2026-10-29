@@ -119,6 +119,19 @@ test('global notification mode is visible through local status and survives daem
   assert.equal(JSON.parse(await readFile(join(f.dir, 'config.json'), 'utf8')).notificationMode, 'brief');
 });
 
+test('notification diagnostics show the actual tenth-message text without adding another send', async t => {
+  const sent = [];
+  const f = await fixture(t, { weixin: { async sendText(_credentials, message) { sent.push(message.text); return { ret: 0 }; } } });
+  await f.service.bridge.credentials.update(c => { c.botToken = 'token'; c.userId = 'owner'; c.contextToken = 'context'; });
+  for (let i = 1; i <= 10; i++) await f.service.bridge.reply(`notice-${i}`, `正文${i}`);
+  await f.service.bridge.sendPending();
+  const notices = await localCall(f.dir, '/notifications');
+  assert.equal(sent.length, 10);
+  assert.equal(notices.at(-1).text, '正文10\n\n连续推送可能已达微信限制。请发送一次“状态”，避免错过后续通知');
+  assert.equal(notices.at(-1).text, sent.at(-1));
+  assert.equal(notices[8].text, '正文9');
+});
+
 test('doctor distinguishes a caller read rejection from a failed desktop connection', async t => {
   const f = await fixture(t);
   await localCall(f.dir, '/register', { connection: {

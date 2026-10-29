@@ -137,7 +137,7 @@ export async function startDaemon({ dir = defaultDataDir(), weixin = new WeixinC
         await bridge.chatCurrent(caller.threadId, connection);
         return { ...bridge.status(), caller, chat: state.read().chats[caller.threadId] };
       },
-      '/notifications': async () => state.read().notifications.map(n => ({ id: n.id, status: n.status, text: n.text, error: n.error, transport: n.transport })),
+      '/notifications': async () => state.read().notifications.map(n => ({ id: n.id, status: n.status, text: n.sentText ?? n.text, error: n.error, transport: n.transport })),
       '/retry-notification': async body => { await bridge.retryNotice(body.id); return { queued: true }; },
       '/login/start': async () => {
         if (login && !['confirmed', 'error', 'expired', 'verify_code_blocked', 'binded_redirect'].includes(login.status)) throw new Error('已有登录等待扫码，请先使用 login-status');

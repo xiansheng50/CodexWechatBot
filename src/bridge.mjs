@@ -8,6 +8,16 @@ import { resolveProject, projectListText } from './projects.mjs';
 export const INITIAL_STATE = { version: 1, nextNumber: 1, chats: {}, selected: null,
   desktopCandidate: null, cursor: '', inbound: [], notifications: [] };
 
+function withPushReminder(notice) {
+  const suffix = '\n\n连续推送可能已达微信限制。请发送一次“状态”，避免错过后续通知';
+  const text = notice.text;
+  // Use the saved result's footer, so later mode/selection changes cannot rewrite it.
+  const footer = notice.kind === 'result' ? text.match(
+    /\n继续此聊天：#\d+ 你的要求\n当前普通消息目标(?:仍为 #\d+|尚未选择)。$/u)?.[0] || '' : '';
+  const body = footer ? text.slice(0, -footer.length) : text;
+  return (truncate(body, 1500 - Array.from(footer + suffix).length) + footer).trimEnd() + suffix;
+}
+
 function updateNotifications(state, chat, enabled, turns = []) {
   if (chat.enabled === enabled) return;
   chat.enabled = enabled;
@@ -37,7 +47,14 @@ export class Bridge {
   }
   async init() {
     await this.state.update(s => recoverState(s));
-    if (Object.hasOwn(this.credentials.read(), 'contextVersion')) await this.credentials.update(c => { delete c.contextVersion; });
+    const credentials = this.credentials.read();
+    if (Object.hasOwn(credentials, 'contextVersion') || credentials.contextToken && !Object.hasOwn(credentials, 'contextMessageId')) {
+      await this.credentials.update(c => {
+        delete c.contextVersion;
+        // Legacy data has no context source ID; use its latest inbound as an estimate.
+        if (c.contextToken && !Object.hasOwn(c, 'contextMessageId')) c.contextMessageId = this.state.read().inbound.at(-1)?.id ?? null;
+      });
+    }
     const candidate = this.state.read().desktopCandidate;
     if (candidate) { try { await this.register(candidate); } catch { this.errors.desktop = '保存的桌面连接已失效，等待 MCP 重新注册'; } }
   }
@@ -150,7 +167,7 @@ export class Bridge {
     if (messages.length !== batch.msgs.length) await this.log('inbound_ignored', { count: batch.msgs.length - messages.length });
     const existing = new Set(this.state.read().inbound.map(m => m.id));
     const latest = messages.findLast(m => !existing.has(m.id) && m.contextToken);
-    if (latest) await this.credentials.update(c => { c.contextToken = latest.contextToken; });
+    if (latest) await this.credentials.update(c => { c.contextToken = latest.contextToken; c.contextMessageId = latest.id; });
     // Context is saved before cursor; only persisted messages can be dispatched.
     await this.state.update(s => {
       for (const message of messages) if (!s.inbound.some(m => m.id === message.id)) {
@@ -397,20 +414,45 @@ export class Bridge {
     try {
       for (const notice of this.state.read().notifications.filter(n => n.status === 'pending')) {
         if (this.closed) return;
-        const c = this.credentials.read();
-        if (!c.botToken || !c.contextToken || this.errors.auth) return;
-        let dispatched = false;
+        const available = this.credentials.read();
+        if (!available.botToken || !available.contextToken || this.errors.auth) return;
+        let dispatched = false, c, sendCount;
         await this.state.update(s => {
           const current = s.notifications.find(n => n.id === notice.id);
           if (current.status !== 'pending') return;
+          // Capture the token and its source together, after any queued incoming update.
+          c = this.credentials.read();
+          if (!c.botToken || !c.contextToken || this.errors.auth) return;
+          const contextMessageId = c.contextMessageId ?? null;
+          if (!s.pushWindow) {
+            const source = s.inbound.find(m => m.id === contextMessageId);
+            // Bootstrap old installations from available attempt history, only once.
+            const count = contextMessageId && !source ? 0 : s.notifications.filter(n => n.attemptedAt &&
+              (!source?.receivedAt || n.attemptedAt >= source.receivedAt)).length;
+            s.pushWindow = { contextMessageId, count };
+          } else if (s.pushWindow.contextMessageId !== contextMessageId) {
+            s.pushWindow = { contextMessageId, count: 0 };
+          }
+          // Reserve before sending: unknown outcomes and crashes may have consumed quota.
+          sendCount = ++s.pushWindow.count;
+          delete current.sentText;
+          if (sendCount === 10) current.sentText = withPushReminder(current);
           current.status = 'sending'; current.clientId ||= `wechatbot-${randomUUID()}`;
           current.attemptedAt = new Date().toISOString(); dispatched = true;
         });
         if (!dispatched) continue;
-        if (this.closed) { await this.state.update(s => { s.notifications.find(n => n.id === notice.id).status = 'pending'; }); return; }
+        if (this.closed) {
+          await this.state.update(s => {
+            const n = s.notifications.find(n => n.id === notice.id);
+            n.status = 'pending'; delete n.sentText;
+            // This attempt is definitely unsent; do not consume its reservation.
+            if (s.pushWindow?.contextMessageId === (c.contextMessageId ?? null) && s.pushWindow.count === sendCount) s.pushWindow.count--;
+          });
+          return;
+        }
         const current = this.state.read().notifications.find(n => n.id === notice.id);
         try {
-          await this.weixin.sendText(c, { toUserId: c.userId, text: current.text, clientId: current.clientId, contextToken: c.contextToken });
+          await this.weixin.sendText(c, { toUserId: c.userId, text: current.sentText ?? current.text, clientId: current.clientId, contextToken: c.contextToken });
           await this.state.update(s => { const n = s.notifications.find(n => n.id === notice.id); n.status = 'accepted'; n.acceptedAt = new Date().toISOString(); delete n.error; });
           delete this.errors.send;
         } catch (e) {
@@ -441,7 +483,7 @@ export class Bridge {
       const terminal = s.inbound.filter(m => ['handled', 'rejected', 'completed'].includes(m.status));
       for (const m of terminal.slice(0, -1000)) { delete m.text; delete m.prompt; delete m.contextToken; }
       const sent = s.notifications.filter(n => ['accepted', 'cancelled'].includes(n.status));
-      for (const n of sent.slice(0, -1000)) { delete n.text; }
+      for (const n of sent.slice(0, -1000)) { delete n.text; delete n.sentText; }
     });
   }
   close() { this.closed = true; this.desktop?.close(); }
